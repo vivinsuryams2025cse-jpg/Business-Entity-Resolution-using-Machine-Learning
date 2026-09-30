@@ -1,6 +1,6 @@
 # Business Entity Resolution
 
-Starter project for inspecting and preprocessing the supplied business entity resolution dataset. The project does not train a machine learning model yet.
+Starter project for inspecting, preprocessing, blocking, feature engineering, and supervised matching of the supplied business entity resolution dataset.
 
 ## Project structure
 
@@ -12,11 +12,15 @@ business_entity_resolution/
 ├── src/
 │   ├── blocking.py
 │   ├── features.py
+│   ├── model.py
+│   ├── train_model.py
+│   ├── evaluate_model.py
 │   ├── inspect_dataset.py
 │   └── preprocessing.py
 ├── tests/
 │   ├── test_blocking.py
 │   ├── test_features.py
+│   ├── test_model.py
 │   └── test_preprocessing.py
 ├── output/
 │   └── candidate_pairs.tsv
@@ -88,7 +92,7 @@ Run the preprocessing unit tests from the project root:
 python -m unittest discover -s tests -v
 ```
 
-The installed scikit-learn, RapidFuzz, NumPy, and Matplotlib libraries are available for later matching and evaluation work. No model or matching workflow is implemented yet.
+scikit-learn, RapidFuzz, NumPy, and Matplotlib are listed in `requirements.txt` for preprocessing, matching, and evaluation.
 
 ## Candidate generation
 
@@ -127,3 +131,29 @@ python -m src.features --split test
 ```
 
 Test features use the training TF-IDF vocabularies and are written to `output/test_features.tsv` without a label column. The feature engineer and batch size are configurable through `FeatureConfig` and `PairFeatureEngineer` in `src/features.py`. The command prints feature distributions and example rows. No real feature dataset can be generated until the supplied TSV files are added to `dataset/`.
+
+## Supervised match model
+
+Run the complete training and validation workflow from the project root:
+
+```powershell
+python -m src.train_model
+```
+
+The script loads the three training sources and ground truth, preprocesses source fields, generates blocking candidates, and labels candidate pairs from `train_ground_truth.tsv`. It splits by Source 1 entity ID so all candidate rows for one Source 1 record remain in one fold. The TF-IDF vectorizers are fitted only on source records belonging to training-fold entities; validation rows do not contribute text or labels to model fitting. The models are Logistic Regression and Random Forest, compared on validation precision, recall, F0.5, and confusion matrices.
+
+Validation threshold tuning checks `0.30`, `0.35`, `0.40`, `0.45`, `0.50`, `0.55`, `0.60`, `0.65`, and `0.70`. The best validation F0.5 chooses the model and threshold; the test set is never used for this choice. F0.5 uses `(1.25 * precision * recall) / (0.25 * precision + recall)`.
+
+Training saves `output/entity_match_model.pkl` (classifier, fitted TF-IDF feature engineer, configuration, and selected threshold), `output/feature_config.json`, `output/validation_metrics.json`, and train/validation feature TSVs for debugging. Reprint the saved model's validation report without retuning with:
+
+```powershell
+python -m src.evaluate_model
+```
+
+The evaluator requires labeled validation features. It does not read test labels or alter the saved threshold. Dataset inspection found no supplied TSV records in this workspace, so training has not been run on challenge data and no challenge performance numbers are available. Unit-test fixtures are for code verification only, not challenge records or labels.
+
+Use a different validation fraction or fixed seed if needed:
+
+```powershell
+python -m src.train_model --validation-size 0.2 --random-state 42
+```

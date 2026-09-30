@@ -467,6 +467,33 @@ def _ground_truth_match_pairs(
     return matches
 
 
+def label_candidate_pairs(
+    candidate_pairs: pd.DataFrame,
+    ground_truth: pd.DataFrame,
+    config: FeatureConfig | None = None,
+) -> pd.DataFrame:
+    """Add binary training labels to candidate pairs from ground truth only."""
+    config = config or FeatureConfig()
+    required_columns = {SOURCE1_PAIR_COLUMN, CANDIDATE_PAIR_COLUMN}
+    missing_columns = required_columns - set(candidate_pairs.columns)
+    if missing_columns:
+        raise ValueError(f"Candidate pairs are missing columns: {sorted(missing_columns)}")
+
+    labeled_pairs = candidate_pairs[
+        [SOURCE1_PAIR_COLUMN, CANDIDATE_PAIR_COLUMN]
+    ].drop_duplicates(ignore_index=True)
+    match_pairs = _ground_truth_match_pairs(ground_truth, config)
+    labels = [
+        int((str(source1_id), str(candidate_id)) in match_pairs)
+        for source1_id, candidate_id in zip(
+            labeled_pairs[SOURCE1_PAIR_COLUMN],
+            labeled_pairs[CANDIDATE_PAIR_COLUMN],
+        )
+    ]
+    labeled_pairs[LABEL_COLUMN] = np.asarray(labels, dtype=np.int8)
+    return labeled_pairs
+
+
 def build_training_feature_dataset(
     source1: pd.DataFrame,
     source2: pd.DataFrame,
@@ -479,15 +506,23 @@ def build_training_feature_dataset(
     feature_dataset = feature_engineer.transform_candidate_pairs(
         source1, source2, source3, candidate_pairs
     )
-    match_pairs = _ground_truth_match_pairs(ground_truth, feature_engineer.config)
-    labels = [
-        int((str(source1_id), str(candidate_id)) in match_pairs)
-        for source1_id, candidate_id in zip(
-            feature_dataset[SOURCE1_PAIR_COLUMN],
-            feature_dataset[CANDIDATE_PAIR_COLUMN],
-        )
-    ]
-    feature_dataset[LABEL_COLUMN] = np.asarray(labels, dtype=np.int8)
+    labeled_pairs = label_candidate_pairs(
+        candidate_pairs, ground_truth, feature_engineer.config
+    )
+    label_lookup = {
+        (str(row[SOURCE1_PAIR_COLUMN]), str(row[CANDIDATE_PAIR_COLUMN])): row[LABEL_COLUMN]
+        for _, row in labeled_pairs.iterrows()
+    }
+    feature_dataset[LABEL_COLUMN] = np.asarray(
+        [
+            label_lookup[(str(source1_id), str(candidate_id))]
+            for source1_id, candidate_id in zip(
+                feature_dataset[SOURCE1_PAIR_COLUMN],
+                feature_dataset[CANDIDATE_PAIR_COLUMN],
+            )
+        ],
+        dtype=np.int8,
+    )
     return feature_dataset
 
 
