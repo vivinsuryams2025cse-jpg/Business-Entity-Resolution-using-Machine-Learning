@@ -11,10 +11,12 @@ business_entity_resolution/
 │   └── test/
 ├── src/
 │   ├── blocking.py
+│   ├── features.py
 │   ├── inspect_dataset.py
 │   └── preprocessing.py
 ├── tests/
 │   ├── test_blocking.py
+│   ├── test_features.py
 │   └── test_preprocessing.py
 ├── output/
 │   └── candidate_pairs.tsv
@@ -105,3 +107,23 @@ The unit tests use small hand-authored fixtures solely to test blocking behavior
 ```powershell
 python -m unittest discover -s tests -v
 ```
+
+## Pair features
+
+Generate training candidates first, keeping them separate from test candidates:
+
+```powershell
+python -m src.blocking --split train --output output/train_candidate_pairs.tsv
+python -m src.features --split train --candidates output/train_candidate_pairs.tsv
+```
+
+This writes `output/train_features.tsv` for debugging and saves a fitted TF-IDF pipeline to `output/feature_pipeline.joblib`. The numeric columns include RapidFuzz name/address scores, normalized edit similarity, token Jaccard/common-token counts, name and address TF-IDF cosine similarities, country equality, length differences, and missing-value indicators. Candidate IDs are retained as row keys; `is_match` is the binary training target.
+
+The feature pipeline fits TF-IDF vocabularies on the three training source tables only. Training labels are joined from `train_ground_truth.tsv` after feature calculation; test ground truth is never read or used. Feature computation is batched (50,000 candidate pairs at a time by default), with the batch size configurable through `FeatureConfig`. Use the saved fitted pipeline for test inference:
+
+```powershell
+python -m src.blocking --split test
+python -m src.features --split test
+```
+
+Test features use the training TF-IDF vocabularies and are written to `output/test_features.tsv` without a label column. The feature engineer and batch size are configurable through `FeatureConfig` and `PairFeatureEngineer` in `src/features.py`. The command prints feature distributions and example rows. No real feature dataset can be generated until the supplied TSV files are added to `dataset/`.
