@@ -15,15 +15,19 @@ business_entity_resolution/
 │   ├── model.py
 │   ├── train_model.py
 │   ├── evaluate_model.py
+│   ├── matching_engine.py
+│   ├── predict.py
 │   ├── inspect_dataset.py
 │   └── preprocessing.py
 ├── tests/
 │   ├── test_blocking.py
 │   ├── test_features.py
 │   ├── test_model.py
+│   ├── test_matching_engine.py
 │   └── test_preprocessing.py
 ├── output/
-│   └── candidate_pairs.tsv
+│   ├── candidate_pairs.tsv
+│   └── matching_results.tsv
 ├── requirements.txt
 └── README.md
 ```
@@ -157,3 +161,15 @@ Use a different validation fraction or fixed seed if needed:
 ```powershell
 python -m src.train_model --validation-size 0.2 --random-state 42
 ```
+
+## Test-time matching
+
+After training and validation select a model and threshold, run inference:
+
+```powershell
+python -m src.predict
+```
+
+The inference engine preprocesses all three test source files, generates and saves `output/candidate_pairs.tsv`, calculates features with the saved training-fitted TF-IDF transformer, scores candidates, and applies the selected validation threshold. It writes `output/matching_results.tsv` with exactly one row for every Source 1 ID. `matched_entity_ids` contains comma-separated, de-duplicated Source 2/3 IDs or is blank when no candidate passes the threshold. Every returned ID is checked against the test candidate sources, and predictions can only come from the generated candidate pairs. Console logging includes Source 1 count, candidate count, predicted-pair count, matched Source 1 count, singleton count, and inference time.
+
+The inference inputs and model can be overridden with `--source1`, `--source2`, `--source3`, and `--model`; `--output-dir` changes both output locations. The checked-in `output/matching_results.tsv` currently contains its header only because the test sources and trained model are not present locally. The engine exits with a clear missing-input message rather than creating fictional results.

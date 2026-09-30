@@ -119,7 +119,11 @@ def _field_values(
     resolved_column = _resolve_feature_column(records, column)
     if resolved_column is None:
         return [None] * len(records)
-    return records[resolved_column].map(normalizer).tolist()
+    normalized_values = records[resolved_column].map(normalizer).tolist()
+    return [
+        value if isinstance(value, str) and value.strip() else None
+        for value in normalized_values
+    ]
 
 
 def _record_keys(
