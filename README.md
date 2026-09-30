@@ -1,6 +1,6 @@
 # Business Entity Resolution
 
-Starter project for inspecting the supplied business entity resolution dataset. The initial script only loads and summarizes the data; it does not train a machine learning model.
+Starter project for inspecting and preprocessing the supplied business entity resolution dataset. The project does not train a machine learning model yet.
 
 ## Project structure
 
@@ -10,7 +10,10 @@ business_entity_resolution/
 │   ├── train/
 │   └── test/
 ├── src/
-│   └── inspect_dataset.py
+│   ├── inspect_dataset.py
+│   └── preprocessing.py
+├── tests/
+│   └── test_preprocessing.py
 ├── output/
 ├── requirements.txt
 └── README.md
@@ -47,4 +50,37 @@ python src/inspect_dataset.py
 
 The script reads every TSV with `sep="\t"` and reports record counts, column names, up to five sample rows, missing values, duplicate entity IDs in source files, source ID prefix checks, and a train/test summary. It lists any missing files and exits with a nonzero status until all expected files are present.
 
-The installed libraries are intended for the later matching and evaluation work. No model or matching workflow is implemented in this starter step.
+## Dataset availability
+
+At the time this preprocessing step was added, both dataset folders contained only their placeholder files: **0 business records and 0 ground-truth rows are available locally**. No challenge data or labels have been generated. Once the complete TSV files are supplied, the preprocessing functions operate on every row they receive, including datasets with approximately 15,000 records.
+
+## Preprocessing
+
+`src/preprocessing.py` provides reusable functions for business names, addresses, and countries. `preprocess_business_records` returns a copy, retains all original columns and identifiers, and adds normalized columns. It accepts configurable source column names and does not drop or cap records. Normalization is local and deterministic; it uses no external services or business data.
+
+Example:
+
+| Field | Before | Normalized |
+| --- | --- | --- |
+| Business name | `North & West Intl., Inc.` | `north and west international inc` |
+| Business address | `24-B, Main St., Suite # 5` | `24 b main street suite 5` |
+| Country | `  fRaNcE  ` | `france` |
+
+Use the functions on a loaded source table while retaining its source IDs and original fields:
+
+```python
+import pandas as pd
+
+from src.preprocessing import preprocess_business_records
+
+source1 = pd.read_csv("dataset/test/test_source1.tsv", sep="\t")
+source1 = preprocess_business_records(source1)
+```
+
+Run the preprocessing unit tests from the project root:
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+The installed scikit-learn, RapidFuzz, NumPy, and Matplotlib libraries are available for later matching and evaluation work. No model or matching workflow is implemented yet.
