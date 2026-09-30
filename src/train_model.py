@@ -5,6 +5,7 @@ from dataclasses import asdict
 import json
 from pathlib import Path
 import sys
+from time import perf_counter
 from typing import Any
 
 import pandas as pd
@@ -18,12 +19,13 @@ from src.features import (
     FeatureConfig,
     PairFeatureEngineer,
     _resolve_id_column,
-    _resolve_optional_id_column,
     label_candidate_pairs,
 )
 from src.model import (
     DEFAULT_THRESHOLDS,
     RANDOM_STATE,
+    _feature_matrix,
+    build_candidate_models,
     compare_models,
     print_evaluation_report,
     save_model_bundle,
@@ -68,43 +70,25 @@ def _training_fold_sources(
     source1: pd.DataFrame,
     source2: pd.DataFrame,
     source3: pd.DataFrame,
-    ground_truth: pd.DataFrame,
     training_pairs: pd.DataFrame,
     config: FeatureConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Select source records for TF-IDF fit without validation-entity text."""
+    """Select all records appearing in training candidates for fold-local TF-IDF."""
     source1_id_column = _resolve_id_column(source1, 1, config.source1_id_column)
-    ground_truth_source1_id = _resolve_id_column(
-        ground_truth, 1, config.ground_truth_source1_id_column
-    )
     training_source1_ids = set(training_pairs[SOURCE1_PAIR_COLUMN].astype(str))
     source1_fit = source1.loc[
         source1[source1_id_column].astype(str).isin(training_source1_ids)
     ]
-    training_ground_truth = ground_truth.loc[
-        ground_truth[ground_truth_source1_id].astype(str).isin(training_source1_ids)
-    ]
+    training_candidate_ids = set(training_pairs[CANDIDATE_PAIR_COLUMN].astype(str))
 
     source2_id_column = _resolve_id_column(source2, 2, config.source2_id_column)
-    ground_truth_source2_id = _resolve_optional_id_column(
-        ground_truth, 2, config.ground_truth_source2_id_column
-    )
-    source2_fit_ids = (
-        set(training_ground_truth[ground_truth_source2_id].dropna().astype(str))
-        if ground_truth_source2_id is not None
-        else set()
-    )
+    source2_ids = set(source2[source2_id_column].astype(str))
+    source2_fit_ids = training_candidate_ids & source2_ids
     source2_fit = source2.loc[source2[source2_id_column].astype(str).isin(source2_fit_ids)]
 
     source3_id_column = _resolve_id_column(source3, 3, config.source3_id_column)
-    ground_truth_source3_id = _resolve_optional_id_column(
-        ground_truth, 3, config.ground_truth_source3_id_column
-    )
-    source3_fit_ids = (
-        set(training_ground_truth[ground_truth_source3_id].dropna().astype(str))
-        if ground_truth_source3_id is not None
-        else set()
-    )
+    source3_ids = set(source3[source3_id_column].astype(str))
+    source3_fit_ids = training_candidate_ids & source3_ids
     source3_fit = source3.loc[source3[source3_id_column].astype(str).isin(source3_fit_ids)]
     return source1_fit, source2_fit, source3_fit
 
@@ -130,11 +114,13 @@ def _add_pair_labels(
 def run_training(
     *,
     output_dir: Path,
+    model_dir: Path = PROJECT_DIR / "models",
     validation_size: float = 0.2,
     random_state: int = RANDOM_STATE,
     feature_config: FeatureConfig | None = None,
 ) -> dict[str, Any]:
     """Run preprocessing, blocking, labels, leakage-safe split, and model fit."""
+    training_started_at = perf_counter()
     feature_config = feature_config or FeatureConfig()
     source1, source2, source3, ground_truth = _load_training_data()
     blocking_config = BlockingConfig(
@@ -163,7 +149,6 @@ def run_training(
         source1,
         source2,
         source3,
-        ground_truth,
         training_pairs,
         feature_config,
     )
@@ -187,9 +172,27 @@ def run_training(
         random_state=random_state,
     )
 
+    deployment_feature_engineer = PairFeatureEngineer(feature_config).fit(
+        source1, source2, source3
+    )
+    deployment_features = deployment_feature_engineer.transform_candidate_pairs(
+        source1, source2, source3, labeled_pairs
+    )
+    deployment_features = _add_pair_labels(deployment_features, labeled_pairs)
+    deployment_estimator = build_candidate_models(random_state)[
+        comparison.selected_model_name
+    ]
+    deployment_estimator.fit(
+        _feature_matrix(deployment_features, list(FEATURE_COLUMNS)),
+        deployment_features[LABEL_COLUMN].to_numpy(dtype="int8"),
+    )
+    comparison.bundle.estimator = deployment_estimator
+    comparison.bundle.feature_engineer = deployment_feature_engineer
+
     output_dir.mkdir(parents=True, exist_ok=True)
-    model_path = output_dir / "entity_match_model.pkl"
-    feature_config_path = output_dir / "feature_config.json"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    model_path = model_dir / "entity_match_model.pkl"
+    feature_config_path = model_dir / "feature_config.json"
     comparison_path = output_dir / "validation_metrics.json"
     training_features_path = output_dir / "train_features.tsv"
     validation_features_path = output_dir / "validation_features.tsv"
@@ -203,6 +206,7 @@ def run_training(
     comparison_report = {
         "random_state": random_state,
         "validation_size": validation_size,
+        "training_time_seconds": perf_counter() - training_started_at,
         "total_possible_pairs": blocking_result.metrics["total_possible_pairs"],
         "candidate_pairs": blocking_result.metrics["candidate_pairs"],
         "training_rows": len(training_features),
@@ -228,7 +232,7 @@ def run_training(
     print(f"  Candidate pairs:      {blocking_result.metrics['candidate_pairs']:,}")
     print(f"  Reduction ratio:      {blocking_result.metrics['reduction_ratio']:.4%}")
     print(f"  Generation time:      {blocking_result.metrics['generation_time_seconds']:.3f}s")
-    print("Training/validation split grouped by Source 1 entity ID")
+    print("Training/validation split grouped by connected candidate entities")
     print(
         f"  Train: {len(training_features):,} rows, "
         f"{int(training_features[LABEL_COLUMN].sum()):,} positives"
@@ -253,6 +257,7 @@ def run_training(
     print("\nSelected model and threshold (validation F0.5 only)")
     print(f"  Model: {comparison.selected_model_name}")
     print(f"  Threshold: {comparison.selected_threshold:.2f}")
+    print(f"  Training time: {comparison_report['training_time_seconds']:.3f}s")
     print(f"  Saved model: {model_path}")
     print(f"  Saved feature config: {feature_config_path}")
     print(f"  Saved validation report: {comparison_path}")
@@ -262,6 +267,7 @@ def run_training(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Train supervised business entity matchers.")
     parser.add_argument("--output-dir", type=Path, default=PROJECT_DIR / "output")
+    parser.add_argument("--model-dir", type=Path, default=PROJECT_DIR / "models")
     parser.add_argument("--validation-size", type=float, default=0.2)
     parser.add_argument("--random-state", type=int, default=RANDOM_STATE)
     parser.add_argument("--feature-config", type=Path)
@@ -270,6 +276,7 @@ def main() -> int:
     try:
         run_training(
             output_dir=args.output_dir,
+            model_dir=args.model_dir,
             validation_size=args.validation_size,
             random_state=args.random_state,
             feature_config=_load_feature_config(args.feature_config),

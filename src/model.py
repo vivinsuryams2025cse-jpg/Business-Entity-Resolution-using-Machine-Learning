@@ -14,7 +14,12 @@ from sklearn.model_selection import GroupShuffleSplit
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from src.features import FEATURE_COLUMNS, LABEL_COLUMN, SOURCE1_PAIR_COLUMN
+from src.features import (
+    CANDIDATE_PAIR_COLUMN,
+    FEATURE_COLUMNS,
+    LABEL_COLUMN,
+    SOURCE1_PAIR_COLUMN,
+)
 
 
 RANDOM_STATE = 42
@@ -33,6 +38,7 @@ class ModelBundle:
     feature_engineer: Any
     random_state: int
     validation_summary: dict[str, Any]
+    validation_estimator: Any = None
 
 
 @dataclass
@@ -114,9 +120,10 @@ def split_by_source1_group(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Split candidate rows by Source 1 ID and choose a stratified group split.
 
-    All candidates from one Source 1 entity stay in the same partition. Among
-    deterministic group-shuffle attempts, choose a split whose validation
-    positive rate is closest to the overall candidate positive rate.
+    All candidates connected through a Source 1 or target entity stay in the
+    same partition. This also prevents a shared Source 2/3 record from crossing
+    folds. Among deterministic group-shuffle attempts, choose a split whose
+    validation positive rate is closest to the overall candidate positive rate.
     """
     if not 0 < validation_size < 1:
         raise ValueError("validation_size must be between 0 and 1.")
@@ -125,7 +132,41 @@ def split_by_source1_group(
     labels = labeled_pairs[label_column].to_numpy(dtype=np.int8)
     if set(np.unique(labels)) != {0, 1}:
         raise ValueError("Training candidates must contain both positive and negative labels.")
-    groups = labeled_pairs[group_column].astype(str).to_numpy()
+    if CANDIDATE_PAIR_COLUMN in labeled_pairs:
+        parents: dict[tuple[str, str], tuple[str, str]] = {}
+        ranks: dict[tuple[str, str], int] = {}
+
+        def find(node: tuple[str, str]) -> tuple[str, str]:
+            parents.setdefault(node, node)
+            ranks.setdefault(node, 0)
+            if parents[node] != node:
+                parents[node] = find(parents[node])
+            return parents[node]
+
+        def union(left: tuple[str, str], right: tuple[str, str]) -> None:
+            left_root = find(left)
+            right_root = find(right)
+            if left_root == right_root:
+                return
+            if ranks[left_root] < ranks[right_root]:
+                left_root, right_root = right_root, left_root
+            parents[right_root] = left_root
+            if ranks[left_root] == ranks[right_root]:
+                ranks[left_root] += 1
+
+        pair_nodes = []
+        for source1_id, candidate_id in zip(
+            labeled_pairs[group_column].astype(str),
+            labeled_pairs[CANDIDATE_PAIR_COLUMN].astype(str),
+        ):
+            source1_node = ("source1", source1_id)
+            candidate_node = ("candidate", candidate_id)
+            union(source1_node, candidate_node)
+            pair_nodes.append(source1_node)
+        groups = np.empty(len(pair_nodes), dtype=object)
+        groups[:] = [find(node) for node in pair_nodes]
+    else:
+        groups = labeled_pairs[group_column].astype(str).to_numpy()
     if len(np.unique(groups)) < 2:
         raise ValueError("At least two distinct Source 1 entities are required for validation.")
 
@@ -251,6 +292,7 @@ def compare_models(
         feature_engineer=feature_engineer,
         random_state=random_state,
         validation_summary=selected_result,
+        validation_estimator=fitted_models[selected_model_name],
     )
     return ModelComparison(
         threshold_results=threshold_results,
@@ -270,7 +312,8 @@ def evaluate_model(
         raise ValueError(f"Evaluation data must contain the {LABEL_COLUMN!r} column.")
     labels = labeled_features[LABEL_COLUMN].to_numpy(dtype=np.int8)
     matrix = _feature_matrix(labeled_features, bundle.feature_columns)
-    probabilities = bundle.estimator.predict_proba(matrix)[:, 1]
+    estimator = bundle.validation_estimator or bundle.estimator
+    probabilities = estimator.predict_proba(matrix)[:, 1]
     return _metrics_at_threshold(labels, probabilities, bundle.threshold)
 
 

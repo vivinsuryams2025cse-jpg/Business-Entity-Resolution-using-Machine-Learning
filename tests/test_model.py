@@ -5,7 +5,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.features import FEATURE_COLUMNS, LABEL_COLUMN, SOURCE1_PAIR_COLUMN
+from src.features import (
+    CANDIDATE_PAIR_COLUMN,
+    FEATURE_COLUMNS,
+    LABEL_COLUMN,
+    SOURCE1_PAIR_COLUMN,
+)
 from src.model import (
     DEFAULT_THRESHOLDS,
     RANDOM_STATE,
@@ -73,6 +78,37 @@ class GroupSplitTests(unittest.TestCase):
         pd.testing.assert_frame_equal(training, repeated_training)
         pd.testing.assert_frame_equal(validation, repeated_validation)
 
+    def test_shared_candidate_entity_never_crosses_folds(self):
+        rows = []
+        for group_number in range(40):
+            candidate_id = "S2-shared" if group_number < 2 else f"S2-{group_number}"
+            rows.extend(
+                [
+                    {
+                        SOURCE1_PAIR_COLUMN: f"S1-{group_number}",
+                        CANDIDATE_PAIR_COLUMN: candidate_id,
+                        LABEL_COLUMN: 1,
+                    },
+                    {
+                        SOURCE1_PAIR_COLUMN: f"S1-{group_number}",
+                        CANDIDATE_PAIR_COLUMN: f"S3-{group_number}",
+                        LABEL_COLUMN: 0,
+                    },
+                ]
+            )
+        labeled_pairs = pd.DataFrame(rows)
+
+        training, validation = split_by_source1_group(labeled_pairs)
+
+        self.assertFalse(
+            set(training[CANDIDATE_PAIR_COLUMN])
+            & set(validation[CANDIDATE_PAIR_COLUMN])
+        )
+        self.assertFalse(
+            set(training[SOURCE1_PAIR_COLUMN])
+            & set(validation[SOURCE1_PAIR_COLUMN])
+        )
+
     def test_validation_entity_text_is_excluded_from_tfidf_training_corpus(self):
         source1 = pd.DataFrame(
             {
@@ -82,8 +118,12 @@ class GroupSplitTests(unittest.TestCase):
         )
         source2 = pd.DataFrame(
             {
-                "entity_id": ["S2-1", "S2-2"],
-                "business_name": ["training-match", "validation-match"],
+                "entity_id": ["S2-1", "S2-negative", "S2-2"],
+                "business_name": [
+                    "training-match",
+                    "training-negative",
+                    "validation-match",
+                ],
             }
         )
         source3 = pd.DataFrame(
@@ -92,28 +132,24 @@ class GroupSplitTests(unittest.TestCase):
                 "business_name": ["training-branch", "validation-branch"],
             }
         )
-        ground_truth = pd.DataFrame(
-            {
-                "source1_entity_id": ["S1-1", "S1-2"],
-                "source2_entity_id": ["S2-1", "S2-2"],
-                "source3_entity_id": ["S3-1", "S3-2"],
-            }
-        )
         training_pairs = pd.DataFrame(
-            {SOURCE1_PAIR_COLUMN: ["S1-1"], LABEL_COLUMN: [1]}
+            {
+                SOURCE1_PAIR_COLUMN: ["S1-1", "S1-1", "S1-1"],
+                CANDIDATE_PAIR_COLUMN: ["S2-1", "S2-negative", "S3-1"],
+                LABEL_COLUMN: [1, 0, 1],
+            }
         )
 
         fit_source1, fit_source2, fit_source3 = _training_fold_sources(
             source1,
             source2,
             source3,
-            ground_truth,
             training_pairs,
             FeatureConfig(),
         )
 
         self.assertEqual(fit_source1["entity_id"].tolist(), ["S1-1"])
-        self.assertEqual(fit_source2["entity_id"].tolist(), ["S2-1"])
+        self.assertEqual(fit_source2["entity_id"].tolist(), ["S2-1", "S2-negative"])
         self.assertEqual(fit_source3["entity_id"].tolist(), ["S3-1"])
 
 
@@ -169,6 +205,7 @@ class ModelSelectionTests(unittest.TestCase):
         )
         self.assertIn(comparison.selected_model_name, comparison.best_model_results)
         self.assertIn(comparison.selected_threshold, DEFAULT_THRESHOLDS)
+        self.assertIs(comparison.bundle.validation_estimator, comparison.bundle.estimator)
         self.assertEqual(
             set(comparison.threshold_results[comparison.selected_model_name][0]),
             {
@@ -203,9 +240,14 @@ class ModelSelectionTests(unittest.TestCase):
             loaded_bundle = load_model_bundle(model_path)
 
         self.assertEqual(loaded_bundle.threshold, comparison.selected_threshold)
+        self.assertIsNotNone(loaded_bundle.validation_estimator)
         metrics = evaluate_model(loaded_bundle, validation)
         self.assertEqual(metrics["threshold"], comparison.selected_threshold)
         self.assertIn("confusion_matrix", metrics)
+
+        loaded_bundle.estimator = None
+        validation_metrics = evaluate_model(loaded_bundle, validation)
+        self.assertEqual(validation_metrics, metrics)
 
     def test_test_like_features_without_labels_cannot_be_evaluated(self):
         bundle = ModelBundle(

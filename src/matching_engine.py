@@ -212,7 +212,7 @@ def main() -> int:
     parser.add_argument(
         "--model",
         type=Path,
-        default=PROJECT_DIR / "output" / "entity_match_model.pkl",
+        default=PROJECT_DIR / "models" / "entity_match_model.pkl",
     )
     parser.add_argument(
         "--source1",

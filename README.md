@@ -2,6 +2,10 @@
 
 Starter project for inspecting, preprocessing, blocking, feature engineering, and supervised matching of the supplied business entity resolution dataset.
 
+## Problem statement
+
+Given business records from three sources, generate plausible cross-source candidates and use the provided training ground truth to learn whether a Source 1 record and a Source 2/3 record represent the same business. For every test Source 1 record, return zero or more Source 2/3 IDs. Only the supplied dataset is used; there are no external lookups or business data sources.
+
 ## Project structure
 
 ```text
@@ -28,8 +32,10 @@ business_entity_resolution/
 ├── output/
 │   ├── candidate_pairs.tsv
 │   └── matching_results.tsv
+├── models/
 ├── requirements.txt
-└── README.md
+├── README.md
+└── Documentation_template.md
 ```
 
 Place the supplied TSV files in these locations:
@@ -65,7 +71,7 @@ The script reads every TSV with `sep="\t"` and reports record counts, column nam
 
 ## Dataset availability
 
-At the time this preprocessing step was added, both dataset folders contained only their placeholder files: **0 business records and 0 ground-truth rows are available locally**. No challenge data or labels have been generated. Once the complete TSV files are supplied, the preprocessing functions operate on every row they receive, including datasets with approximately 15,000 records.
+The current checkout contains **0 challenge records and 0 ground-truth rows**: both dataset folders contain only placeholders. No challenge data or labels have been generated. The pipeline is designed for the full supplied dataset, including approximately 15,000 records per source, once the files are placed in the listed folders.
 
 ## Preprocessing
 
@@ -127,7 +133,7 @@ python -m src.features --split train --candidates output/train_candidate_pairs.t
 
 This writes `output/train_features.tsv` for debugging and saves a fitted TF-IDF pipeline to `output/feature_pipeline.joblib`. The numeric columns include RapidFuzz name/address scores, normalized edit similarity, token Jaccard/common-token counts, name and address TF-IDF cosine similarities, country equality, length differences, and missing-value indicators. Candidate IDs are retained as row keys; `is_match` is the binary training target.
 
-The feature pipeline fits TF-IDF vocabularies on the three training source tables only. Training labels are joined from `train_ground_truth.tsv` after feature calculation; test ground truth is never read or used. Feature computation is batched (50,000 candidate pairs at a time by default), with the batch size configurable through `FeatureConfig`. Use the saved fitted pipeline for test inference:
+The feature pipeline fits TF-IDF vocabularies on training-fold records appearing in training-fold candidates only. Training labels are joined from `train_ground_truth.tsv` after candidate generation; test ground truth is never read or used. Feature computation is batched (50,000 candidate pairs at a time by default), with the batch size configurable through `FeatureConfig`. Use the saved fitted pipeline for test inference:
 
 ```powershell
 python -m src.blocking --split test
@@ -144,19 +150,21 @@ Run the complete training and validation workflow from the project root:
 python -m src.train_model
 ```
 
-The script loads the three training sources and ground truth, preprocesses source fields, generates blocking candidates, and labels candidate pairs from `train_ground_truth.tsv`. It splits by Source 1 entity ID so all candidate rows for one Source 1 record remain in one fold. The TF-IDF vectorizers are fitted only on source records belonging to training-fold entities; validation rows do not contribute text or labels to model fitting. The models are Logistic Regression and Random Forest, compared on validation precision, recall, F0.5, and confusion matrices.
+The script loads the three training sources and ground truth, preprocesses source fields, generates blocking candidates, and labels candidate pairs from `train_ground_truth.tsv`. It splits by connected components over Source 1 and candidate IDs. Thus candidates for the same Source 1 and any shared Source 2/3 candidate stay together, preventing entity overlap across train and validation. Fold TF-IDF vocabularies use all candidate records in the training fold, including negative examples, and exclude validation-only entities. The models are Logistic Regression and Random Forest, compared on validation precision, recall, F0.5, and confusion matrices.
 
 Validation threshold tuning checks `0.30`, `0.35`, `0.40`, `0.45`, `0.50`, `0.55`, `0.60`, `0.65`, and `0.70`. The best validation F0.5 chooses the model and threshold; the test set is never used for this choice. F0.5 uses `(1.25 * precision * recall) / (0.25 * precision + recall)`.
 
-Training saves `output/entity_match_model.pkl` (classifier, fitted TF-IDF feature engineer, configuration, and selected threshold), `output/feature_config.json`, `output/validation_metrics.json`, and train/validation feature TSVs for debugging. Reprint the saved model's validation report without retuning with:
+The model with the best validation F0.5 is selected; precision breaks an F0.5 tie. The threshold is independently selected from the requested grid using validation F0.5 only. After selection, the chosen classifier and TF-IDF transformer are refit on all labeled training candidates for deployment. The bundle retains its separate validation-fold estimator, so the saved validation report stays held out and honest. Training time is recorded in the validation report.
+
+Training saves `models/entity_match_model.pkl` (deployment classifier, validation-fold estimator, training-fitted TF-IDF feature engineer, feature configuration, and selected threshold), `models/feature_config.json`, `output/validation_metrics.json`, and train/validation feature TSVs for debugging. Reprint the held-out validation report without retuning with:
 
 ```powershell
 python -m src.evaluate_model
 ```
 
-The evaluator requires labeled validation features. It does not read test labels or alter the saved threshold. Dataset inspection found no supplied TSV records in this workspace, so training has not been run on challenge data and no challenge performance numbers are available. Unit-test fixtures are for code verification only, not challenge records or labels.
+The evaluator requires labeled validation features and uses the saved validation-fold estimator. It does not read test labels or alter the saved threshold. Dataset inspection found no supplied TSV records in this workspace, so training has not been run on challenge data; no model has been selected and no challenge precision, recall, F0.5, timing, or candidate counts are available. Unit-test fixtures are for code verification only, not challenge records or labels.
 
-Use a different validation fraction or fixed seed if needed:
+Use a different validation fraction or fixed seed if needed. The default random state is 42. The candidate-component split is deterministic and is checked for both classes in each fold. The fold-fitted vectorizers exclude validation-only records. The final deployment refit uses training data only; test sources and any test labels are not used for fitting or threshold selection.
 
 ```powershell
 python -m src.train_model --validation-size 0.2 --random-state 42
@@ -173,3 +181,15 @@ python -m src.predict
 The inference engine preprocesses all three test source files, generates and saves `output/candidate_pairs.tsv`, calculates features with the saved training-fitted TF-IDF transformer, scores candidates, and applies the selected validation threshold. It writes `output/matching_results.tsv` with exactly one row for every Source 1 ID. `matched_entity_ids` contains comma-separated, de-duplicated Source 2/3 IDs or is blank when no candidate passes the threshold. Every returned ID is checked against the test candidate sources, and predictions can only come from the generated candidate pairs. Console logging includes Source 1 count, candidate count, predicted-pair count, matched Source 1 count, singleton count, and inference time.
 
 The inference inputs and model can be overridden with `--source1`, `--source2`, `--source3`, and `--model`; `--output-dir` changes both output locations. The checked-in `output/matching_results.tsv` currently contains its header only because the test sources and trained model are not present locally. The engine exits with a clear missing-input message rather than creating fictional results.
+
+## Limitations and validation
+
+The provided checkout currently lacks all seven required TSV files, so the actual challenge pipeline cannot be trained, inferred, or scored here. Blocking recall, selected model, selected threshold, validation/test metrics, and runtime on the real 15,000-record data are therefore unknown. A search found no `utils/validate_submission.py`; structural output invariants are covered by `tests/test_matching_engine.py`, but that external submission utility could not be run. `Documentation_template.md` provides a run record for dataset inventory, measured validation results, inference counts, and submission checks.
+
+## Reproducibility
+
+Use the project virtual environment and install the packages from `requirements.txt`; keep the supplied TSV files unchanged, and record the Git revision and resolved Python/package versions for each run. The default model random state and split seed are 42. Training writes the chosen threshold, both model comparison results, split counts, model artifacts, and feature configuration. Test inference reuses those saved artifacts and threshold. The full test suite is:
+
+```powershell
+python -m unittest discover -s tests -v
+```
