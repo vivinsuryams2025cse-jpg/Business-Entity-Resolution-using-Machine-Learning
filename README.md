@@ -10,11 +10,14 @@ business_entity_resolution/
 │   ├── train/
 │   └── test/
 ├── src/
+│   ├── blocking.py
 │   ├── inspect_dataset.py
 │   └── preprocessing.py
 ├── tests/
+│   ├── test_blocking.py
 │   └── test_preprocessing.py
 ├── output/
+│   └── candidate_pairs.tsv
 ├── requirements.txt
 └── README.md
 ```
@@ -84,3 +87,21 @@ python -m unittest discover -s tests -v
 ```
 
 The installed scikit-learn, RapidFuzz, NumPy, and Matplotlib libraries are available for later matching and evaluation work. No model or matching workflow is implemented yet.
+
+## Candidate generation
+
+Run candidate generation against the test sources from the project root:
+
+```powershell
+python -m src.blocking
+```
+
+Use `--split train` to run against training source tables, or `--output path/to/file.tsv` to choose another destination. The program reads Source 1, Source 2, and Source 3 TSVs with `sep="\t"` and writes `output/candidate_pairs.tsv` with exactly `source1_entity_id` and `candidate_entity_id` columns. Candidate IDs retain their original source prefixes so Source 2 and Source 3 remain distinguishable. The checked-in output currently contains only the required header because no source TSV data is available yet.
+
+Blocking uses a union of exact normalized country, business-name tokens, character prefixes, address tokens, and country-plus-field keys. By default, blocks producing more than 5,000 cross-source pairs are skipped; each Source 1 record is limited to 100 candidates per target source. Both settings are configurable through `BlockingConfig` in `src/blocking.py`. The output is only a candidate set; it does not make final match decisions. Console metrics include all possible pairs, candidates, reduction ratio, generation time, per-source coverage, capped Source 1 rows, and oversized blocks skipped.
+
+The unit tests use small hand-authored fixtures solely to test blocking behavior; they are not challenge records or ground-truth labels. A 15,000-by-15,000-by-15,000 scale fixture checks bounded generation. Run the tests with:
+
+```powershell
+python -m unittest discover -s tests -v
+```
